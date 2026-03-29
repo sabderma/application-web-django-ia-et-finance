@@ -1,6 +1,9 @@
 from django.contrib import admin
 from django.urls import path, include
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from django.urls import path, include
+
+
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -12,4 +15,10 @@ urlpatterns = [
 
     # Finance API
     path("api/", include("finance.urls")),
+
+    path("api/ml/", include("mlapp.urls")),
+
+ 
+
 ]
+    

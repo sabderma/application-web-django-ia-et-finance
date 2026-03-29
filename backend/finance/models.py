@@ -3,6 +3,8 @@ from django.db import models
 
 from django.utils import timezone
 
+from django.core.validators import MinValueValidator, MaxValueValidator
+
 class FinancialProfile(models.Model):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
@@ -19,28 +21,63 @@ class FinancialProfile(models.Model):
     default=0)
 
     objectif_epargne = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    class Statut(models.TextChoices):
+        ETUDIANT = "ETUDIANT", "Étudiant"
+        SALARIE = "SALARIE", "Salarié"
+        RETRAITE = "RETRAITE", "Retraité"
+
+    # ... tes champs existants
+    age = models.PositiveIntegerField(
+    default=18,
+    validators=[MinValueValidator(16), MaxValueValidator(100)]
+    )
+
+    statut = models.CharField(
+    max_length=10,
+    choices=Statut.choices,
+    default=Statut.ETUDIANT
+    )
+
 
     def __str__(self):
         return f"Profil financier de {self.user.username}"
 
 
+from django.conf import settings
+from django.db import models
+
+
 class Category(models.Model):
-    # Catégorie propre à l'utilisateur
+    class CategoryType(models.TextChoices):
+        NORMAL = "NORMAL", "Normal"
+        SUBSCRIPTION = "SUBSCRIPTION", "Abonnement"
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="categories",
     )
+
     name = models.CharField(max_length=80)
-    active = models.BooleanField(default=True)
+
+    # ✅ On garde uniquement le type
+    type = models.CharField(
+        max_length=20,
+        choices=CategoryType.choices,
+        default=CategoryType.NORMAL,
+    )
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["user", "name"], name="uniq_category_per_user")
+            models.UniqueConstraint(
+                fields=["user", "name", "type"],
+                name="uniq_category_per_user_name_type"
+            )
         ]
 
     def __str__(self):
-        return f"{self.user.username} - {self.name}"
+        return f"{self.user.username} - {self.name} ({self.type})"
+    
 
 
 class Expense(models.Model):
@@ -50,9 +87,9 @@ class Expense(models.Model):
         related_name="expenses",
     )
     category = models.ForeignKey(
-        Category,
-        on_delete=models.PROTECT,
-        related_name="expenses",
+    Category,
+    on_delete=models.CASCADE,   
+    related_name="expenses",
     )
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     date = models.DateField()
@@ -64,19 +101,16 @@ class Expense(models.Model):
 
 
 class RecurringExpense(models.Model):
-    """
-    Abonnement / dépense récurrente (ex: Netflix 20€ le 2 de chaque mois)
-    On l'utilise pour calculer les totaux mensuels sans créer 100 lignes Expense.
-    """
+   
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="recurring_expenses",
     )
     category = models.ForeignKey(
-        Category,
-        on_delete=models.PROTECT,
-        related_name="recurring_expenses",
+    Category,
+    on_delete=models.CASCADE,   
+    related_name="recurring_expenses",
     )
 
     name = models.CharField(max_length=120)  # ex: Netflix
@@ -84,7 +118,7 @@ class RecurringExpense(models.Model):
 
     start_date = models.DateField()
     end_date = models.DateField(null=True, blank=True)  # optionnel
-    day_of_month = models.PositiveSmallIntegerField(default=1)  # 1..28/31
+    day_of_month = models.PositiveSmallIntegerField(default=1)  
 
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -115,15 +149,19 @@ class PurchaseSimulation(models.Model):
 
     item_name = models.CharField(max_length=120)
     price = models.DecimalField(max_digits=12, decimal_places=2)
-    priority = models.CharField(max_length=10, choices=Priority.choices, default=Priority.WANT)
+    priority = models.CharField(
+        max_length=10,
+        choices=Priority.choices,
+        default=Priority.WANT
+    )
 
-    desired_date = models.DateField(null=True, blank=True)
+    # ✅ supprimé : desired_date
 
     decision = models.CharField(max_length=15, choices=Decision.choices)
     estimated_months = models.PositiveIntegerField(default=0)
     recommended_monthly_saving = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
-    details = models.JSONField(default=dict, blank=True)  # totals, warnings, etc.
+    details = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

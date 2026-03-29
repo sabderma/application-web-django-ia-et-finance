@@ -1,5 +1,11 @@
 from django.contrib import admin
-from .models import FinancialProfile, Category, Expense, RecurringExpense
+from .models import (
+    FinancialProfile,
+    Category,
+    Expense,
+    RecurringExpense,
+    PurchaseSimulation,
+)
 
 
 @admin.register(FinancialProfile)
@@ -9,7 +15,9 @@ class FinancialProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ("user", "name", "active")
+    # ✅ active supprimé du modèle Category
+    list_display = ("user", "name", "type")
+    list_filter = ("type",)
     search_fields = ("user__username", "name")
 
 
@@ -22,18 +30,11 @@ class ExpenseAdmin(admin.ModelAdmin):
 
 @admin.register(RecurringExpense)
 class RecurringExpenseAdmin(admin.ModelAdmin):
+    # ✅ ici active existe toujours (RecurringExpense.active)
     list_display = ("user", "name", "amount", "day_of_month", "start_date", "end_date", "active")
     list_filter = ("active", "day_of_month")
     search_fields = ("user__username", "name")
 
-
-
-
-#------------
-
-
-from django.contrib import admin
-from .models import PurchaseSimulation
 
 @admin.register(PurchaseSimulation)
 class PurchaseSimulationAdmin(admin.ModelAdmin):

@@ -1,30 +1,60 @@
-from rest_framework import generics, permissions
-from .models import Category, Expense, RecurringExpense
+from datetime import date
+from decimal import Decimal, ROUND_CEILING
+
+from django.db.models import Sum, Q
+from django.utils import timezone
+
+from rest_framework import generics, permissions, status
+from rest_framework.views import APIView
+from rest_framework.response import Response
+
+from .models import Category, Expense, RecurringExpense, PurchaseSimulation, FinancialProfile
 from .serializers import (
     CategorySerializer,
     ExpenseSerializer,
     RecurringExpenseSerializer,
-)
-from decimal import Decimal, ROUND_CEILING
-from datetime import date
+    PurchaseSimulationSerializer,
+    FinancialProfileSerializer,
+    PurchaseSimulateInputSerializer,
+    AdviceInputSerializer,
+)   
 
-from django.db.models import Sum
-from django.utils import timezone
-from rest_framework import status
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from django.db import models
+from rest_framework.permissions import IsAuthenticated
 
-
+from .advice import build_budget_prompt, call_groq
+#----------------------
 class CategoryListCreateView(generics.ListCreateAPIView):
     serializer_class = CategorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Category.objects.filter(user=self.request.user, active=True).order_by("name")
+        qs = Category.objects.filter(user=self.request.user).order_by("name")
+        type_param = self.request.query_params.get("type")
+        if type_param:
+            qs = qs.filter(type=type_param)
+        return qs
+        
+class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET    /categories/<id>/ -> détail
+    PATCH  /categories/<id>/ -> modifier (ex: renommer, type)
+    DELETE /categories/<id>/ -> supprimer
+    """
+    serializer_class = CategorySerializer
+    permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        return Category.objects.filter(user=self.request.user)
+    
+# --------------------
+# EXPENSES
+# --------------------
 
 class ExpenseListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /expenses/ -> liste
+    POST /expenses/ -> créer
+    """
     serializer_class = ExpenseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -32,7 +62,12 @@ class ExpenseListCreateView(generics.ListCreateAPIView):
         return Expense.objects.filter(user=self.request.user).order_by("-date")
 
 
-class ExpenseDetailView(generics.RetrieveDestroyAPIView):
+class ExpenseDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET    /expenses/<id>/ -> détail
+    PATCH  /expenses/<id>/ -> modifier
+    DELETE /expenses/<id>/ -> supprimer
+    """
     serializer_class = ExpenseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -40,7 +75,15 @@ class ExpenseDetailView(generics.RetrieveDestroyAPIView):
         return Expense.objects.filter(user=self.request.user)
 
 
+# --------------------
+# RECURRING EXPENSES
+# --------------------
+
 class RecurringExpenseListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /recurring-expenses/ -> liste
+    POST /recurring-expenses/ -> créer
+    """
     serializer_class = RecurringExpenseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -49,21 +92,26 @@ class RecurringExpenseListCreateView(generics.ListCreateAPIView):
 
 
 class RecurringExpenseDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET    /recurring-expenses/<id>/ -> détail
+    PATCH  /recurring-expenses/<id>/ -> modifier
+    DELETE /recurring-expenses/<id>/ -> supprimer
+    """
     serializer_class = RecurringExpenseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         return RecurringExpense.objects.filter(user=self.request.user)
-    
 
 
-#----------historique
-
-from .models import PurchaseSimulation
-from .serializers import PurchaseSimulationSerializer
-
+# --------------------
+# PURCHASE SIMULATIONS (HISTORIQUE)
+# --------------------
 
 class PurchaseSimulationListView(generics.ListAPIView):
+    """
+    GET /purchase-simulations/ -> historique
+    """
     serializer_class = PurchaseSimulationSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -72,6 +120,10 @@ class PurchaseSimulationListView(generics.ListAPIView):
 
 
 class PurchaseSimulationDetailView(generics.RetrieveDestroyAPIView):
+    """
+    GET    /purchase-simulations/<id>/ -> détail
+    DELETE /purchase-simulations/<id>/ -> supprimer
+    """
     serializer_class = PurchaseSimulationSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -79,8 +131,22 @@ class PurchaseSimulationDetailView(generics.RetrieveDestroyAPIView):
         return PurchaseSimulation.objects.filter(user=self.request.user)
 
 
+# --------------------
+# FINANCIAL PROFILE (1 profil par user)
+# --------------------
 
+class FinancialProfileMeView(generics.RetrieveUpdateAPIView):
+    """
+    GET   /financial-profile/me/  -> récupérer le profil du user connecté
+    PATCH /financial-profile/me/  -> modifier le profil (âge, salaire, statut, etc.)
+    """
+    serializer_class = FinancialProfileSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
+    def get_object(self):
+       
+        obj, _created = FinancialProfile.objects.get_or_create(user=self.request.user)
+        return obj
 #----------------------
 
 
@@ -105,9 +171,9 @@ class PurchaseSimulateView(APIView):
     POST /api/simulate/
     Calcule: acheter maintenant ou attendre
     """
+    permission_classes = [IsAuthenticated]
+
     def post(self, request):
-        from .models import FinancialProfile, Expense, RecurringExpense, PurchaseSimulation
-        from .serializers import PurchaseSimulateInputSerializer, PurchaseSimulationSerializer
 
         inp = PurchaseSimulateInputSerializer(data=request.data)
         inp.is_valid(raise_exception=True)
@@ -117,14 +183,16 @@ class PurchaseSimulateView(APIView):
         item_name = data["item_name"]
         price: Decimal = data["price"]
         priority = data["priority"]
-        desired_date = data.get("desired_date")
         monthly_target = data.get("monthly_saving_target")
 
         # 1) Profil financier
         try:
             profile = user.financial_profile
         except FinancialProfile.DoesNotExist:
-            return Response({"detail": "Profil financier introuvable."}, status=400)
+            return Response(
+                {"detail": "Profil financier introuvable."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         solde = Decimal(profile.solde or 0)
         salaire = Decimal(profile.salaire_mensuel or 0)
@@ -133,47 +201,38 @@ class PurchaseSimulateView(APIView):
         today = timezone.localdate()
         m_start, m_end = _month_bounds(today)
 
-        # 2) Dépenses variables du mois (Expense)
+        # 2) Dépenses variables du mois
         var_sum = Expense.objects.filter(
             user=user,
             date__gte=m_start,
             date__lt=m_end
         ).aggregate(s=Sum("amount"))["s"] or Decimal("0")
 
-        # 3) Abonnements actifs sur le mois (RecurringExpense)
-        # actif si start_date <= fin_mois et (end_date null ou end_date >= debut_mois)
+        # 3) Abonnements actifs
         rec_qs = RecurringExpense.objects.filter(
             user=user,
             active=True,
             start_date__lt=m_end,
         ).filter(
-            models.Q(end_date__isnull=True) | models.Q(end_date__gte=m_start)
+            Q(end_date__isnull=True) | Q(end_date__gte=m_start)
         )
 
         rec_sum = rec_qs.aggregate(s=Sum("amount"))["s"] or Decimal("0")
 
-        # 4) Marge de sécurité selon priorité
-        # (tu peux ajuster les chiffres)
+        # 4) Marge selon priorité
         if priority == "NEED":
             safety_margin = Decimal("50")
         elif priority == "WANT":
             safety_margin = Decimal("150")
-        else:  # LUXURY
+        else:
             safety_margin = Decimal("300")
 
-        # 5) Capacité mensuelle d’épargne estimée
+        # 5) Capacité mensuelle
         monthly_capacity = salaire - fixes - var_sum - rec_sum
 
-        warnings = []
-        if salaire == 0:
-            warnings.append("Salaire = 0 : la capacité d’épargne peut être négative/limitée.")
-        if var_sum == 0:
-            warnings.append("Aucune dépense variable saisie ce mois : le calcul peut être optimiste.")
-        if monthly_capacity <= 0:
-            warnings.append("Capacité mensuelle d’épargne <= 0 : il faudra réduire les dépenses ou augmenter les revenus.")
-
-        # 6) Décision maintenant ?
         need_total = price + safety_margin
+
+        # 6) Décision
         if solde >= need_total:
             decision = "BUY_NOW"
             estimated_months = 0
@@ -181,7 +240,6 @@ class PurchaseSimulateView(APIView):
         else:
             missing = need_total - solde
 
-            # Si l’utilisateur impose un montant par mois
             if monthly_target is not None and monthly_target > 0:
                 recommended_monthly = Decimal(monthly_target)
                 estimated_months = _ceil_div(missing, recommended_monthly)
@@ -196,36 +254,7 @@ class PurchaseSimulateView(APIView):
                     recommended_monthly = monthly_capacity
                     decision = "WAIT"
 
-        # 7) Faisabilité par date souhaitée
-        feasible_by_date = None
-        months_until = None
-        if desired_date:
-            # mois approximatifs entre today et desired_date (arrondi)
-            dy = (desired_date.year - today.year) * 12 + (desired_date.month - today.month)
-            months_until = max(0, dy)
-            if decision == "BUY_NOW":
-                feasible_by_date = True
-            elif decision == "WAIT":
-                feasible_by_date = (estimated_months <= months_until)
-            else:
-                feasible_by_date = False
-
-        # 8) Conseils simples : top catégories dépensées ce mois
-        top_categories = []
-        qs = Expense.objects.filter(user=user, date__gte=m_start, date__lt=m_end)\
-            .values("category__name")\
-            .annotate(total=Sum("amount"))\
-            .order_by("-total")[:3]
-        for row in qs:
-            top_categories.append({"category": row["category__name"], "total": row["total"]})
-
-        suggestions = []
-        if decision in ("WAIT", "NOT_POSSIBLE") and top_categories:
-            c = top_categories[0]
-            suggestions.append(
-                f"Réduire '{c['category']}' de 50€ / mois peut accélérer ton achat."
-            )
-
+        # 7) Détails simplifiés
         details = {
             "month": str(today)[:7],
             "solde": str(solde),
@@ -235,21 +264,13 @@ class PurchaseSimulateView(APIView):
             "abonnements_mois": str(rec_sum),
             "safety_margin": str(safety_margin),
             "monthly_capacity": str(monthly_capacity),
-            "warnings": warnings,
-            "top_categories": top_categories,
-            "suggestions": suggestions,
-            "desired_date": str(desired_date) if desired_date else None,
-            "months_until_desired_date": months_until,
-            "feasible_by_desired_date": feasible_by_date,
         }
 
-        # 9) Sauvegarder en DB (historique)
         sim = PurchaseSimulation.objects.create(
             user=user,
             item_name=item_name,
             price=price,
             priority=priority,
-            desired_date=desired_date,
             decision=decision,
             estimated_months=estimated_months,
             recommended_monthly_saving=recommended_monthly,
@@ -258,11 +279,10 @@ class PurchaseSimulateView(APIView):
 
         out = PurchaseSimulationSerializer(sim).data
         return Response(out, status=status.HTTP_201_CREATED)
-
-
-
 #-----------------------------------
 
+from rest_framework.views import APIView
+from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 class DashboardView(APIView):
@@ -281,6 +301,7 @@ class DashboardView(APIView):
         # 1) Mois ciblé
         month_str = request.query_params.get("month")  # "YYYY-MM"
         today = timezone.localdate()
+
         if month_str:
             try:
                 dt = datetime.strptime(month_str, "%Y-%m")
@@ -307,11 +328,11 @@ class DashboardView(APIView):
         salaire = Decimal(profile.salaire_mensuel or 0)
         fixes = Decimal(profile.depenses_fixes or 0)
 
-        # 3) Dépenses variables du mois
+        # 3) Dépenses variables du mois (Expense)
         var_qs = Expense.objects.filter(user=user, date__gte=m_start, date__lt=m_end)
         var_total = var_qs.aggregate(s=Sum("amount"))["s"] or Decimal("0")
 
-        # 4) Abonnements actifs sur le mois
+        # 4) Abonnements actifs sur le mois (RecurringExpense)
         rec_qs = RecurringExpense.objects.filter(
             user=user,
             active=True,
@@ -321,24 +342,48 @@ class DashboardView(APIView):
         )
         rec_total = rec_qs.aggregate(s=Sum("amount"))["s"] or Decimal("0")
 
-        # 5) Répartition par catégories (graph)
-        by_category = list(
+        # 5) Répartition par catégories (graph) = NORMAL + ABONNEMENT (1 seul graph)
+        var_by_cat = list(
             var_qs.values("category__name")
-                 .annotate(total=Sum("amount"))
-                 .order_by("-total")
+                  .annotate(total=Sum("amount"))
         )
-        # on renomme la clé pour être plus clean côté front
+
+        rec_by_cat = list(
+            rec_qs.values("category__name")
+                  .annotate(total=Sum("amount"))
+        )
+
+        merged = {}
+
+        for row in var_by_cat:
+            name = row["category__name"] or "Sans catégorie"
+            merged.setdefault(name, {"normal": Decimal("0"), "abonnement": Decimal("0")})
+            merged[name]["normal"] += (row["total"] or Decimal("0"))
+
+        for row in rec_by_cat:
+            name = row["category__name"] or "Sans catégorie"
+            merged.setdefault(name, {"normal": Decimal("0"), "abonnement": Decimal("0")})
+            merged[name]["abonnement"] += (row["total"] or Decimal("0"))
+
         by_category = [
-            {"category": row["category__name"], "total": str(row["total"])}
-            for row in by_category
+            {
+                "category": name,
+                "normal_total": str(vals["normal"]),
+                "abonnement_total": str(vals["abonnement"]),
+                "total": str(vals["normal"] + vals["abonnement"]),
+            }
+            for name, vals in merged.items()
         ]
 
-        # 6) Top 5 dépenses (liste)
+        by_category.sort(key=lambda x: Decimal(x["total"]), reverse=True)
+
+        # 6) Top 5 dépenses (liste) - seulement Expense (variables)
         top_expenses = list(
             var_qs.select_related("category")
-                 .order_by("-amount")[:5]
-                 .values("id", "amount", "date", "description", "category__name")
+                  .order_by("-amount")[:5]
+                  .values("id", "amount", "date", "description", "category__name")
         )
+
         top_expenses = [
             {
                 "id": r["id"],
@@ -382,6 +427,67 @@ class DashboardView(APIView):
 
 
 
-#-----------------
+class CategoryAllListView(generics.ListAPIView):
+    """
+    GET /categories/all/ -> toutes les catégories
+    """
+    serializer_class = CategorySerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Category.objects.filter(user=self.request.user).order_by("name")
+    
 
 
+
+
+class AdviceView(APIView):
+    """
+    POST /api/advice/
+    Body: { "simulation_id": 123 }
+    Retour: { "advice_text": "..." }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        inp = AdviceInputSerializer(data=request.data)
+        inp.is_valid(raise_exception=True)
+
+        sim_id = inp.validated_data["simulation_id"]
+
+        sim = PurchaseSimulation.objects.filter(id=sim_id, user=request.user).first()
+        if not sim:
+            return Response({"detail": "Simulation introuvable."}, status=status.HTTP_404_NOT_FOUND)
+
+        d = sim.details or {}
+
+        summary = {
+            "item_name": sim.item_name,
+            "price": str(sim.price),
+            "priority": sim.priority,
+            "decision": sim.decision,
+            "estimated_months": sim.estimated_months,
+            "recommended_monthly_saving": str(sim.recommended_monthly_saving),
+
+            # chiffres du details (si présents)
+            "solde": d.get("solde"),
+            "salaire_mensuel": d.get("salaire_mensuel"),
+            "depenses_fixes": d.get("depenses_fixes"),
+            "depenses_variables_mois": d.get("depenses_variables_mois"),
+            "abonnements_mois": d.get("abonnements_mois"),
+            "monthly_capacity": d.get("monthly_capacity"),
+        }
+
+        prompt = build_budget_prompt(summary)
+
+        try:
+            advice_text = call_groq(prompt)
+        except Exception as e:
+            print("ADVICE ERROR:", repr(e))  # ✅ affiche l'erreur exacte dans le terminal
+            return Response(
+                {"detail": "Erreur lors de l'appel IA", "error": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+
+        return Response({"advice_text": advice_text}, status=status.HTTP_200_OK)
